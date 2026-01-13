@@ -10,7 +10,7 @@ def main():
     # Qt 애플리케이션 생성
     app = QApplication(sys.argv)
     
-    from UI.main_window import MainWindow
+    from ui.main_window import MainWindow
 
     # 메인 윈도우 생성 및 표시
     window = MainWindow()
