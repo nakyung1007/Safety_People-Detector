@@ -1,3 +1,6 @@
+## Merzes 프로그램 코드
+
+
 # 표준 라이브러리
 import sys
 import os
@@ -41,45 +44,19 @@ from PyQt5.QtWidgets import (
     QFrame, QPushButton, QStackedWidget, QComboBox, QMenu, QAction,
     QShortcut, QMessageBox, QLineEdit
 )
-
-from safety_logger import *
 import sys
-
-try:
-    from ultralytics import YOLO
-    YOLO_AVAILABLE = True
-    print("[SYSTEM] YOLO 모듈 로드 성공")
-except ImportError:
-    YOLO_AVAILABLE = False
-    print("[SYSTEM] YOLO 모듈 없음 - 일반 카메라 모드로 동작")
-
 
 HOST, PORT = "192.168.0.99", 2111
 STX, ETX = b"\x02", b"\x03"
-
 #SICK ASCII 프로토콜의 프레임 시작(STX), 끝(ETX)
 # 모든 명령은 STX + 명령 + ETX 형태로 전송해야 함
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)    # TCP소켓 생성 
-# 수정 전
-# sock.connect((HOST, PORT))
-
-# 수정 후 (예외 처리 추가)
-try:
-    sock.settimeout(3.0) # 3초 동안 기다려봄
-    sock.connect((HOST, PORT))
-    print("LiDAR 연결 성공!")
-except socket.timeout:
-    print("에러: 라이더가 대답이 없습니다. IP 설정이나 케이블을 확인하세요.")
-except Exception as e:
-    print(f"에러 발생: {e}")
-    
+sock.connect((HOST, PORT))  #   라이더에 연결
 sock.sendall(STX + b"sEN LMDscandata 1" + ETX)  # 스캔데이터 송신
 sock.settimeout(1.0)    #1초이상 응답 없다면 프로그램 멈춤을 방지함
 
-#OUT_DIR = r"C:\Users\admin\Desktop\카메라"    # 카메라 저장경로
-60
-OUT_DIR = r"C:\Users\whskr\Desktop\merzes\Motor_BlackBox"
+OUT_DIR = r"C:\Users\123\Desktop\카메라"    # 카메라 저장경로
 
 def resource_path(rel_path):
     if hasattr(sys, "_MEIPASS"):
@@ -142,15 +119,14 @@ class CameraThread(QThread):
     frame_signal = pyqtSignal(object)
     fps_signal = pyqtSignal(float)
 
-    # 수정 후:
-    def __init__(self, ui_ref, rtsp_url, out_dir, fourcc="mp4v", target_fps=30,
-                yolo_model_path=None, enable_yolo=False):
+    def __init__(self, ui_ref, rtsp_url, out_dir, fourcc="mp4v", target_fps=30):
         super().__init__()
         self.ui = ui_ref
         self.rtsp_url = rtsp_url
-        self.base_out_dir = out_dir
+        self.base_out_dir = out_dir     # 날짜 폴더 생성 기준 경로
         self.fourcc = fourcc
         self.target_fps = target_fps
+
 
         self.running = True
         self.recording = False
@@ -159,25 +135,6 @@ class CameraThread(QThread):
 
         self.segment_sec = 60
         self.segment_start_time = None
-
-        # ★★★ YOLO 추가 부분 ★★★
-        self.enable_yolo = enable_yolo and YOLO_AVAILABLE
-        self.yolo_model = None
-        
-        if self.enable_yolo and yolo_model_path:
-            try:
-                from ultralytics import YOLO
-                import torch # 상단에 import 필요
-                if os.path.exists(yolo_model_path):
-                    # GPU 사용 가능 여부 확인 후 장치 할당
-                    self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-                    self.yolo_model = YOLO(yolo_model_path).to(self.device) # GPU로 모델 이동
-                    print(f"[CAM] YOLO 모델 로드 성공 ({self.device} 모드): {yolo_model_path}")
-                else:
-                    self.enable_yolo = False
-            except Exception as e:
-                print(f"[CAM] YOLO 로드 실패: {e}")
-                self.enable_yolo = False
 
     # 날짜별 폴더 생성
     def get_today_folder(self):
@@ -291,7 +248,7 @@ class CameraThread(QThread):
                 if not ok or frame is None:
                     self.ui.state_icon.camera_connected = False
                     print("[CAM] frame read failed")
-                    time.sleep(0.5)
+                    time.sleep(0.1)
                     continue
 
                 # 정상 프레임
@@ -304,66 +261,6 @@ class CameraThread(QThread):
                 if self.frame_size is None:
                     h, w = frame.shape[:2]
                     self.frame_size = (w, h)
-                
-                  # ★★★ YOLO 추론 추가 ★★★
-                if self.enable_yolo and self.yolo_model:
-                    try:
-                        results = self.yolo_model.predict(
-                            frame,
-                            conf=0.5,
-                            iou=0.45,
-                            verbose=False,
-                            device= self.device
-                        )
-                        
-                        # --- [추가] 로그용 데이터를 담을 임시 리스트 ---
-                        temp_log_data = []
-
-                        for result in results:
-                            boxes = result.boxes
-                            for box in boxes:
-                                x1,y1,x2,y2 = map(int, box.xyxy[0].cpu().numpy())
-                                # 신뢰도 및 클래스
-                                conf = float(box.conf[0])
-                                cls_name = self.yolo_model.names[int(box.cls[0])]
-                                
-                                # 바운딩 박스 그리기 (빨간색)
-                                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
-                                
-                                # 라벨 텍스트
-                                label = f"{cls_name} {conf:.2f}"
-                                
-                                # 라벨 배경
-                                (tw, th), _ = cv2.getTextSize(
-                                    label, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2
-                                )
-                                cv2.rectangle(
-                                    frame,
-                                    (x1, y1 - th - 10),
-                                    (x1 + tw, y1),
-                                    (0, 0, 255),
-                                    -1
-                                )
-                                
-                                # 라벨 텍스트
-                                cv2.putText(
-                                    frame,
-                                    label,
-                                    (x1, y1 - 5),
-                                    cv2.FONT_HERSHEY_SIMPLEX,
-                                    0.8,
-                                    (255, 255, 255),
-                                    2
-                                )
-                                temp_log_data.append({
-                                    "class":cls_name,
-                                    "conf": round(conf,2),
-                                    "coords" : {"x1": x1, "y1" :y1, "x2": x2, "y2": y2}
-                                })
-                        self.ui.cuurent_detected_people = temp_log_data
-                    except Exception as e:
-                        print(f"[CAM] YOLO 추론 에러: {e}")
-                # ★★★ YOLO 추론 끝 ★★★
 
                 
                 # 녹화 중이면 writer write
@@ -596,16 +493,21 @@ class LidarCanvas(FigureCanvas):
     
     # 업데이트
     def update_lidar(self, _):
-        # 1. LiDAR 데이터 수신 및 파싱
+
+        # LiDAR 데이터 수신 
         buf = b""
         try:
             buf += sock.recv(65536)
         except:
+            # 수신 실패 > LiDAR 끊김 표시
             self.ui.state_icon.lidar_connected = False
+
             return self.scat,
 
         if STX not in buf or ETX not in buf:
+            # 패킷 불량
             self.ui.state_icon.lidar_connected = False
+
             return self.scat,
 
         a, b = buf.find(STX), buf.find(ETX)
@@ -613,83 +515,109 @@ class LidarCanvas(FigureCanvas):
 
         if "LMDscandata" not in msg:
             self.ui.state_icon.lidar_connected = False
+
             return self.scat,
 
         th, r = parse_lmd(msg)
         if th is None:
             self.ui.state_icon.lidar_connected = False
+
             return self.scat,
 
-        # 상태 업데이트
+        # 상태만 업데이트
         self.ui.state_icon.lidar_connected = True
         self.ui.last_lidar_frame_time = time.time()
 
-        # 2. 좌표 변환 (극좌표 -> 직교좌표)
+
+        # 극>직교 변환
         th = (th + self.ANGLE_OFFSET) % (2*np.pi)
         x = -r * np.sin(th)
         y =  r * np.cos(th)
         pts = np.column_stack((x, y))
 
-        # 3. 군집화 (DBSCAN) 및 사람 판별
+        # DBSCAN
         db = DBSCAN(eps=0.12, min_samples=5).fit(pts)
         labels = db.labels_
 
+        # 색상 및 군집별 분류 
         colors = []
-        person_centroids = []
-        unique_labels = set(labels)
-        
-        for lab in labels:
-            if lab == -1: 
-                colors.append("gray")  # 노이즈
+        for _, lab in enumerate(labels):
+            if lab == -1:
+                colors.append("gray")
             else:
                 cluster = pts[labels == lab]
-                if is_person(cluster):
-                    cx, cy = cluster.mean(axis=0)
-                    person_centroids.append((cx, cy))
+                colors.append("red" if is_person(cluster) else "blue")
 
-        # 사람 인식 결과 터미널 출력
-        if person_centroids:
-            print(f"[DETECTION] 라이다 객체(사람) 인식됨! 인원: {len(person_centroids)}명")
-        
-        # x 기준 정렬
+        # 사람 centroid 계산 
+        person_centroids = []
+        for lab in set(labels):
+            if lab == -1:
+                continue
+            cluster = pts[labels == lab]
+            if is_person(cluster):
+                cx, cy = cluster.mean(axis=0)
+                person_centroids.append((cx, cy))
+
+        # x 기준 정렬 (p1,p2 번호 고정)
         person_centroids = sorted(person_centroids, key=lambda p: p[0])
 
-        # 산점도 업데이트
+        # 산점도 업데이트 
         self.scat.set_offsets(pts)
         self.scat.set_color(colors)
 
-       # 6. CSV 기록 (저장 기능 활성화 시)
+        # CSV 기록 (data save 버튼 ON일 때만) 
         if self.lidar_save_enabled:
-            # 여기에 기존 CSV 저장 로직을 넣거나 보관하세요.
-            pass
+            
+            if time.time() - self.csv_segment_start >= self.csv_segment_sec:
+            # 오래된 파일 닫기
+                if self.csv_file:
+                    self.csv_file.close()
 
-        # 7. [핵심] 자동 추적 및 서보 모터 제어
-        if hasattr(self.ui, 'auto_tracking_enabled') and self.ui.auto_tracking_enabled:
-            if person_centroids:
-                # 추적 대상 설정 (가장 왼쪽 인물)
-                target_p = person_centroids[0]
-                tx, ty = target_p[0], target_p[1]
-                
-                # ObjectTracker 모듈을 이용한 각도 계산
-                b_angle, t_angle = self.ui.tracker.calculate_angles(tx, ty)
-                
-                # 일정 각도 이상의 변화가 있을 때만 명령 전송 (데드존 적용)
-                if self.ui.tracker.should_move(b_angle, t_angle):
-                    print(f"[TRACKER] 모터 이동 명령 전송 -> B:{b_angle}°, T:{t_angle}° | 좌표:({tx:.2f}, {ty:.2f})")
-                    self.ui.sendCmd(f"s1:{b_angle}")
-                    time.sleep(0.01) # 명령 충돌 방지 간격
-                    self.ui.sendCmd(f"s2:{t_angle}")
+                # 새 파일 생성
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                csv_filename = f"lidar_{ts}.csv"
+                self.csv_file = open(csv_filename, "w", newline="", encoding="utf-8")
+                self.csv_writer = csv.writer(self.csv_file)
+                self.csv_writer.writerow(["timestamp", "P1_x", "P1_y"])
 
-        # 8. 좌표 정보 UI 텍스트 업데이트
+                self.csv_segment_start = time.time()
+                print(f"[LIDAR CSV] 새 파일 생성: {csv_filename}")
+            
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            num_p = len(person_centroids)
+
+            if num_p == 0:
+                self.csv_writer.writerow([ts, "NONE"])
+            else:
+                coord_flat = []
+                for (px, py) in person_centroids:
+                    coord_flat.append(f"{px:.3f}")
+                    coord_flat.append(f"{py:.3f}")
+
+                # 사람 간 거리 (cm)
+                dist_list = []
+                for i in range(num_p):
+                    for j in range(i+1, num_p):
+                        dx = person_centroids[i][0] - person_centroids[j][0]
+                        dy = person_centroids[i][1] - person_centroids[j][1]
+                        dist_cm = math.sqrt(dx*dx + dy*dy) * 100
+                        dist_list.append(f"(p{i+1}-p{j+1}){dist_cm:.2f}")
+
+                self.csv_writer.writerow([ts] + coord_flat + dist_list)
+
+        # Info UI 업데이트 
         if self.mouse_inside:
             mx, my = self.mouse_pos
             d = math.sqrt(mx*mx + my*my)
             beta = math.degrees(math.atan2(my, mx))
-            self.info_text.set_text(f"X: {mx:.3f} m\nY: {my:.3f} m\nd: {d:.3f} m\nβ: {beta:.3f}°")
 
-        # 9. 최종 결과 반환 (이 함수가 끝나기 전 단 한 번만 실행)
+            self.info_text.set_text(
+                f"X: {mx:.3f} m\n"
+                f"Y: {my:.3f} m\n"
+                f"d: {d:.3f} m\n"
+                f"β: {beta:.3f}°"
+            )
         return self.scat,
-
 
 class State_Icon:
     def __init__(self, ui_ref):
@@ -777,101 +705,26 @@ class ToggleButton(QPushButton):
         if self.rect().contains(event.pos()):
             self.clicked_release.emit()
 
-class ObjectTracker:
-    def __init__(self, bottom_center=90, top_center=90, deadzone=2.0):
-        """
-        :param bottom_center: 바텀 모터 정면 각도 (기본 90)
-        :param top_center: 탑 모터 정면 각도 (기본 90)
-        :param deadzone: 모터 떨림 방지를 위한 최소 변화 각도
-        """
-        self.bottom_center = bottom_center
-        self.top_center = top_center
-        self.deadzone = deadzone
-        
-        # 마지막으로 전송한 각도 저장
-        self.last_bottom_angle = bottom_center
-        self.last_top_angle = top_center
-
-    def calculate_angles(self, target_x, target_y):
-        """
-        라이다 좌표 (x, y)를 모터 각도로 변환
-        $x$: 좌우 이동 거리 (m), $y$: 정면 거리 (m)
-        """
-        # 1. 바텀 모터 (Yaw) 계산: atan2(x, y)를 통해 각도 산출
-        # 라디안을 도(degree) 단위로 변환
-        angle_rad = math.atan2(target_x, target_y)
-        angle_deg = math.degrees(angle_rad)
-        
-        # 정면(90도) 기준 좌우 보정
-        target_bottom = self.bottom_center - angle_deg 
-
-        # 2. 탑 모터 (Pitch) 계산
-        # 라이다는 2D이므로 거리에 따라 각도를 살짝 조절하는 예시 로직
-        distance = math.sqrt(target_x**2 + target_y**2)
-        # 거리 5m를 기준으로 가까울수록 각도를 낮춤 (예시)
-        target_top = self.top_center - (10.0 / (distance + 0.1)) 
-
-        # 3. 안전 범위 제한 (0~180도)
-        target_bottom = max(0, min(180, target_bottom))
-        target_top = max(0, min(180, target_top))
-
-        return int(target_bottom), int(target_top)
-
-    def should_move(self, new_b, new_t):
-       # 미세한 떨림 방지 (데드존)
-        if abs(new_b - self.last_bottom_angle) > self.deadzone or \
-           abs(new_t - self.last_top_angle) > self.deadzone:
-            self.last_bottom_angle = new_b
-            self.last_top_angle = new_t
-            return True
-        return False
-
 class MyUI(QWidget):
     def __init__(self):
         super().__init__()
         self.state_icon = State_Icon(self)
-        self.tracker = ObjectTracker(bottom_center=90, top_center=90, deadzone=3.0)
-        self.auto_tracking_enabled = False
-        self.current_detected_people = []
-
-
         self.initUI()
         self.menu_open = False
         self.selected_port = None
         self.serial_conn = None
         self.ser = None               # 시리얼 객체
-        self.last_camera_frame_time = time.time()
-        self.last_lidar_frame_time = time.time()
+        self.last_camera_frame_time = 0
+        self.last_lidar_frame_time = 0
         self.device_check_timer = QTimer()
         self.device_check_timer.timeout.connect(self.check_device_status)
         self.device_check_timer.start(2000)   #초마다 검사
-        
-        # [여기 추가] 로그 관련 초기화
-        self.safety_logger = SafetyLogger(OUT_DIR)
-        self.current_detected_people = []  # 탐지된 사람 정보 보관함
-        
-        # [여기 추가] 5초 로그 타이머
-        self.log_timer = QTimer(self)
-        self.log_timer.timeout.connect(self.save_5sec_safety_log)
 
         self.timer2 = QTimer(self)
         self.timer2.timeout.connect(self.update_timestamp)
         self.timer2.start(1000)
         self.update_timestamp()
 
-    def save_5sec_safety_log(self):
-        """5초마다 실행될 실제 저장 로직"""
-        log_entry = {
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
-            "safety_status": {
-                "min_distance": getattr(self, 'current_min_distance', None),
-                "risk_level": "SAFE" 
-            },
-            "detected_people": self.current_detected_people, # 보관함에서 꺼내옴
-            "detected_equipment": [] 
-        }
-        self.safety_logger.write_json_log(log_entry)
-        print(f"[SYSTEM] JSON 로그 저장 완료")
 
     def toggle_comport_menu(self):
         try:
@@ -1807,16 +1660,14 @@ class MyUI(QWidget):
 
         # RTSP URL
         self.rtsp_url = "rtsp://admin:ajwptm12!@192.168.0.64:554/Streaming/Channels/101"
-    
+
         # 카메라 스레드 생성
         self.cam_thread = CameraThread(
-            ui_ref=self,
+            ui_ref = self,
             rtsp_url=self.rtsp_url,
             out_dir=OUT_DIR,
             fourcc="mp4v",
-            target_fps=30,
-            yolo_model_path="model/best.pt",  # ★★★ 가중치 파일 경로
-            enable_yolo=True             # ★★★ YOLO 활성화
+            target_fps=30
         )
 
         # UI 업데이트 연결
@@ -2080,7 +1931,7 @@ class MyUI(QWidget):
         # 3️⃣ 모든 검증 통과 → SYSTEM ON
         self.state_icon.system_started = True
         self.state_icon.update_state()
-        self.log_timer.start(2000)
+
 
         print("[SYSTEM] START ON > 모든 장치 정상")
         QMessageBox.information(self, "SYSTEM", "시스템이 활성화되었습니다.")
@@ -2109,14 +1960,9 @@ class MyUI(QWidget):
 
 
     def handle_end(self):
-        # [추가] 5초 주기 로그 타이머 중지
-        if hasattr(self, 'log_timer'):
-            self.log_timer.stop()
-            
         # 시스템 비활성화
         self.state_icon.system_started = False
         self.state_icon.update_state()
-    
 
         # 시리얼 종료
         if self.ser and self.ser.is_open:
@@ -2150,8 +1996,8 @@ class MyUI(QWidget):
         now = time.time()
 
         # 카메라 상태 확인
-        camera_alive = (now - self.last_camera_frame_time < 15.0)
-        lidar_alive  = (now - self.last_lidar_frame_time  < 5.0)
+        camera_alive = (now - self.last_camera_frame_time < 2.0)
+        lidar_alive  = (now - self.last_lidar_frame_time  < 2.0)
 
         self.state_icon.camera_connected = camera_alive
         self.state_icon.lidar_connected  = lidar_alive
@@ -2168,7 +2014,7 @@ class MyUI(QWidget):
 
             try:
                 self.cam_thread.stop()
-                time.sleep(1.0)
+                time.sleep(0.5)
 
                 # CameraThread 재생성
                 self.cam_thread = CameraThread(
@@ -2176,15 +2022,11 @@ class MyUI(QWidget):
                     self.rtsp_url,
                     OUT_DIR,
                     "mp4v",
-                    30,
-                    yolo_model_path='model/best.pt',
-                    enable_yolo=True
+                    30
                 )
                 self.cam_thread.frame_signal.connect(self.update_camera_frame)
                 self.cam_thread.start()
 
-                # [중요] 재연결 시도했으므로 타이머 리셋 (연속 재부팅 방지)
-                self.last_camera_frame_time = time.time()
                 print("[CAM] 자동 재연결 성공")
 
             except Exception as e:
