@@ -708,6 +708,19 @@ class LidarCanvas(FigureCanvas):
 
                 self.csv_writer.writerow([ts] + coord_flat + dist_list)
 
+
+        # 2. [위치 이동] 자동 추적 로직 (return 위로 올림)
+        if self.ui.auto_tracking_enabled and person_centroids:
+            target_p = person_centroids[0]  # 가장 먼저 발견된 사람 추적
+            tx, ty = target_p[0], target_p[1]
+            
+            b_angle, t_angle = self.ui.tracker.calculate_angles(tx, ty)
+            
+            if self.ui.tracker.should_move(b_angle, t_angle):
+                self.ui.sendCmd(f"s1:{b_angle}")
+                time.sleep(0.01) 
+                self.ui.sendCmd(f"s2:{t_angle}")
+                
         # Info UI 업데이트 
         if self.mouse_inside:
             mx, my = self.mouse_pos
