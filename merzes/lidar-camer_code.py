@@ -532,6 +532,53 @@ class LidarCanvas(FigureCanvas):
         # 업데이트 시작
         self.ani = FuncAnimation(self.fig, self.update_lidar, interval=80, blit=False, cache_frame_data=False)
 
+    def calculate_angles(self, target_x_m, target_y_m):
+        """
+        라이다에서 온 m 단위 좌표를 받아서 정밀 캘리브레이션 후 서보 각도(0~180) 반환
+        """
+        # 1. 단위를 cm로 변환
+        lx = target_x_m * 100.0
+        ly = target_y_m * 100.0
+        lz = 0.0 
+
+        # 2. 1번 모터(Pan) 기준 좌표 계산
+        m1_x = lx + self.off1['x']
+        m1_y = ly + self.off1['y']
+        
+        # 3. 2번 모터(Tilt) 기준 좌표 계산
+        m2_x = m1_x + self.off2['x']
+        m2_y = m1_y + self.off2['y']
+        m2_z = lz + self.off1['z'] + self.off2['z']
+
+        # 4. 렌즈 오프셋 보정 (최종 타겟 지점)
+        target_x = m2_x - self.off3['x']
+        target_y = m2_y - self.off3['y']
+        target_z = m2_z - self.off3['z']
+
+        # 5. 최종 각도 계산 (Inverse Kinematics)
+        # Pan (좌우): 90도(중심) + 편차 각도
+        pan_deviation = math.degrees(math.atan2(m2_x, m2_y))
+        target_bottom = self.bottom_center + pan_deviation 
+
+        # Tilt (상하): 90도(중심) - 편차 각도
+        horizontal_dist = math.sqrt(target_x**2 + target_y**2)
+        tilt_deviation = math.degrees(math.atan2(target_z, horizontal_dist))
+        target_top = self.top_center - tilt_deviation 
+
+        # 6. 모터 범위 제한 (0~180)
+        target_bottom = max(0, min(180, target_bottom))
+        target_top = max(0, min(180, target_top))
+
+        return int(target_bottom), int(target_top)
+
+    def should_move(self, new_b, new_t):
+        if abs(new_b - self.last_bottom_angle) > self.deadzone or \
+           abs(new_t - self.last_top_angle) > self.deadzone:
+            self.last_bottom_angle = new_b
+            self.last_top_angle = new_t
+            return True
+        return False
+    
     def on_mouse_move(self, event):
 
         if event.inaxes is None:
@@ -833,7 +880,13 @@ class MyUI(QWidget):
         self.timer2 = QTimer(self)
         self.timer2.timeout.connect(self.update_timestamp)
         self.timer2.start(1000)
-        
+
+        # --- [조나경 님 실측 오프셋 데이터 (단위: cm)] ---
+        self.off1 = {'x': 0.0,  'y': 35.7, 'z': 5.9}  # 라이다 ↔ Pan축
+        self.off2 = {'x': 0.8,  'y': 36.7, 'z': 0.9}  # Pan축 ↔ Tilt축
+        self.off3 = {'x': 2.0,  'y': 0.0,  'z': 5.4}  # Tilt축 ↔ 렌즈
+        # -----------------------------------------------
+
     def save_5sec_safety_log(self):
         """5초마다 실행될 실제 저장 로직"""
         log_entry = {
