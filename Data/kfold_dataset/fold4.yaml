@@ -1,0 +1,12 @@
+path: /home/kwy00/PPE_detection/Safety_People-Detector/Data/kfold_dataset/fold4
+train: images/train
+val: images/val
+names:
+  0: Crane
+  1: Crane_hook
+  2: Forklift
+  3: Helmet
+  4: Person
+  5: Tractor
+  6: Vehicle
+  7: Vest

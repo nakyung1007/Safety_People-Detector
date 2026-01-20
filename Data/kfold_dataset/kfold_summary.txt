@@ -1,0 +1,37 @@
+======================================================================
+K-Fold Cross Validation 요약
+======================================================================
+
+총 이미지 수: 9225
+Fold 개수: 5
+각 fold 크기: 약 1845개
+
+======================================================================
+학습 실행 방법
+======================================================================
+
+# Fold 0 학습
+python retrain_yolo_kfold.py --fold 0
+
+# Fold 1 학습
+python retrain_yolo_kfold.py --fold 1
+
+# Fold 2 학습
+python retrain_yolo_kfold.py --fold 2
+
+# Fold 3 학습
+python retrain_yolo_kfold.py --fold 3
+
+# Fold 4 학습
+python retrain_yolo_kfold.py --fold 4
+
+
+======================================================================
+YAML 파일 목록
+======================================================================
+
+Fold 0: kfold_dataset/fold0.yaml
+Fold 1: kfold_dataset/fold1.yaml
+Fold 2: kfold_dataset/fold2.yaml
+Fold 3: kfold_dataset/fold3.yaml
+Fold 4: kfold_dataset/fold4.yaml
