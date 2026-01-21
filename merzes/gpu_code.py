@@ -27,6 +27,11 @@ from matplotlib.figure import Figure
 from matplotlib.animation import FuncAnimation
 from matplotlib.patches import Wedge
 from sklearn.cluster import DBSCAN
+
+#module import
+from motor_controller import SmoothMotorController, ObjectTracker
+
+
 # PyQt5
 
 from PyQt5.QtCore import (
@@ -120,20 +125,20 @@ def parse_lmd(frame):
 # 사람 판별
 def is_person(pts):
     n = len(pts)
-    if not (20 <= n <= 70):
+    if not (15 <= n <= 80):
         return False
 
     width  = np.ptp(pts[:,0])
-    height = np.ptp(pts[:,1])
-    if width > 1.2 or height > 1.2:
-        return False
+    height = np.ptp(pts[:,1]) 
 
+    # 2. 사람의 가로/세로 폭 제한 (라이다 단면은 보통 20cm~60cm 사이)
+    # 1.2m는 너무 큽니다. 0.15m ~ 0.8m 정도로 제한하세요.
+    if not (0.15 <= width <= 0.8) or not (0.15 <= height <= 0.8):
+        return False
+    
+    # 3. 가로세로 비율 (너무 길쭉한 물체 제외)
     ratio = height / (width + 1e-6)
-    if not (0.3 <= ratio <= 4.0):
-        return False
-
-    d = np.sqrt(np.sum(np.diff(pts, axis=0)**2, axis=1))
-    if np.std(d) < 0.003:
+    if not (0.5 <= ratio <= 2.0):
         return False
 
     return True
@@ -465,14 +470,10 @@ class CameraThread(QThread):
 
         self.wait()
 
-
-# PyQt 위젯용 LiDAR CANVAS
 class LidarCanvas(FigureCanvas):
     coord_signal = pyqtSignal(float, float, float, float)
+    
     def __init__(self, ui_ref, parent=None):
-        
-        
-        
         self.fig = Figure(figsize=(8.6, 5.4), dpi=100)
         super().__init__(self.fig)
         self.ui = ui_ref       
@@ -481,10 +482,16 @@ class LidarCanvas(FigureCanvas):
         self.lidar_save_enabled = False
         self.csv_file = None
         self.csv_writer = None
-
-        
-        self.csv_segment_sec = 60   #분 단위 분할
+        self.csv_segment_sec = 60
         self.csv_segment_start = None
+
+         # ✅ 프레임 카운터 추가
+        self.frame_count = 0
+        self.print_interval = 10  # 10프레임마다 출력
+        
+        # ✅ 추적 주기 제어
+        self.last_track_time = 0
+        self.track_interval = 0.1  # 100ms = 10Hz
 
 
         self.ax = self.fig.add_subplot(111)
@@ -502,55 +509,45 @@ class LidarCanvas(FigureCanvas):
 
         self.setStyleSheet("background: transparent;")
         self.fig.patch.set_facecolor("none")
-        # self.ax = self.fig.add_subplot(111)
         self.ax.set_facecolor("none")
         
         # FOV
-        fov = Wedge((0,0), 25, -45, 225, facecolor="lightgray", alpha=0.3)
+        fov = Wedge((0,0), 25, 135, 405, facecolor="lightgray", alpha=0.3)
         self.ax.add_patch(fov)
 
         # LiDAR marker
         self.ax.plot(0,0,"ks", markersize=8)
-
         self.scat = self.ax.scatter([], [], s=8)
 
+        # 마우스 이벤트
         self.fig.canvas.mpl_connect("scroll_event", self.on_scroll)
         self.fig.canvas.mpl_connect("button_press_event", self.on_press)
         self.fig.canvas.mpl_connect("motion_notify_event", self.on_motion)
         self.fig.canvas.mpl_connect("button_release_event", self.on_release)
+        self.fig.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
+        
         self.mouse_inside = False
-
-        # 마우스 좌표 저장
         self.mouse_pos = [0, 0]
 
         # 회전 보정
-        self.ANGLE_OFFSET = np.deg2rad(270.0)
-
-        # 마우스 이벤트
-        self.fig.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
+        self.ANGLE_OFFSET = np.deg2rad(180.0)
 
         # 업데이트 시작
         self.ani = FuncAnimation(self.fig, self.update_lidar, interval=80, blit=False, cache_frame_data=False)
 
     def on_mouse_move(self, event):
-
         if event.inaxes is None:
             return
-
-        # 좌표 없음 > 무시
         if event.xdata is None or event.ydata is None:
             return
 
-        # 실제 좌표 계산
         x = event.xdata
         y = event.ydata
         d = (x**2 + y**2)**0.5
         beta = np.degrees(np.arctan2(y, x))
 
-        # MyUI로 전달
         self.coord_signal.emit(x, y, d, beta)
 
-    # 마우스 휠로 확대/축소
     def on_scroll(self, event):
         if event.xdata is None:
             return
@@ -594,145 +591,104 @@ class LidarCanvas(FigureCanvas):
         if hasattr(self, "_pan"):
             del self._pan
     
-    # 업데이트
     def update_lidar(self, _):
-
-        # LiDAR 데이터 수신 
         buf = b""
         try:
             buf += sock.recv(65536)
         except:
-            # 수신 실패 > LiDAR 끊김 표시
             self.ui.state_icon.lidar_connected = False
-
             return self.scat,
 
         if STX not in buf or ETX not in buf:
-            # 패킷 불량
             self.ui.state_icon.lidar_connected = False
-
             return self.scat,
 
         a, b = buf.find(STX), buf.find(ETX)
         msg = buf[a+1:b].decode(errors="ignore")
-
-        if "LMDscandata" not in msg:
-            self.ui.state_icon.lidar_connected = False
-
-            return self.scat,
-
         th, r = parse_lmd(msg)
-        if th is None:
-            self.ui.state_icon.lidar_connected = False
-
+        if th is None: 
             return self.scat,
 
-        # 상태만 업데이트
         self.ui.state_icon.lidar_connected = True
         self.ui.last_lidar_frame_time = time.time()
 
+        th, r = parse_lmd(msg)
+        if th is None: 
+            return self.scat,
 
-        # 극>직교 변환
+        self.ui.state_icon.lidar_connected = True
+        self.ui.last_lidar_frame_time = time.time()
+
+        # 🔥 아래쪽을 향하도록 변환
         th = (th + self.ANGLE_OFFSET) % (2*np.pi)
-        x = -r * np.sin(th)
-        y =  r * np.cos(th)
+        x = r * np.cos(th)
+        y = r * np.sin(th)
         pts = np.column_stack((x, y))
 
-        # DBSCAN
-        db = DBSCAN(eps=0.12, min_samples=5).fit(pts)
+        # DBSCAN 클러스터링
+        db = DBSCAN(eps=0.25, min_samples=10).fit(pts)
         labels = db.labels_
 
-        # 색상 및 군집별 분류 
         colors = []
-        for _, lab in enumerate(labels):
-            if lab == -1:
-                colors.append("gray")
-            else:
-                cluster = pts[labels == lab]
-                colors.append("red" if is_person(cluster) else "blue")
-
-        # 사람 centroid 계산 
-        person_centroids = []
-        for lab in set(labels):
-            if lab == -1:
+        person_candidates = []
+        
+        unique_labels = set(labels)
+        for lab in unique_labels:
+            if lab == -1: 
                 continue
             cluster = pts[labels == lab]
+            
             if is_person(cluster):
                 cx, cy = cluster.mean(axis=0)
-                person_centroids.append((cx, cy))
+                dist = math.sqrt(cx**2 + cy**2)
+                if dist < 15.0:  # 15m 이내
+                    person_candidates.append({'pos': (cx, cy), 'dist': dist})
 
-        # x 기준 정렬 (p1,p2 번호 고정)
-        person_centroids = sorted(person_centroids, key=lambda p: p[0])
+        # 색상 할당
+        for lab in labels:
+            if lab == -1: 
+                colors.append("gray")
+            else: 
+                colors.append("blue")
 
-        # 산점도 업데이트 
+       # 가장 가까운 사람 선정
+        target_person = None
+        if person_candidates:
+            person_candidates = sorted(person_candidates, key=lambda p: p['dist'])
+            target_person = person_candidates[0]
+            
+            # ✅ 출력 빈도 감소
+            self.frame_count += 1
+            if self.frame_count % self.print_interval == 0:
+                print(f"[DETECTION] 거리: {target_person['dist']:.2f}m, "
+                      f"X: {target_person['pos'][0]:.2f}m, "
+                      f"Y: {target_person['pos'][1]:.2f}m")
+
         self.scat.set_offsets(pts)
         self.scat.set_color(colors)
-
-        # CSV 기록 (data save 버튼 ON일 때만) 
-        if self.lidar_save_enabled:
-            
-            if time.time() - self.csv_segment_start >= self.csv_segment_sec:
-            # 오래된 파일 닫기
-                if self.csv_file:
-                    self.csv_file.close()
-
-                # 새 파일 생성
-                ts = time.strftime("%Y%m%d_%H%M%S")
-                csv_filename = f"lidar_{ts}.csv"
-                self.csv_file = open(csv_filename, "w", newline="", encoding="utf-8")
-                self.csv_writer = csv.writer(self.csv_file)
-                self.csv_writer.writerow(["timestamp", "P1_x", "P1_y"])
-
-                self.csv_segment_start = time.time()
-                print(f"[LIDAR CSV] 새 파일 생성: {csv_filename}")
-            
-            ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            num_p = len(person_centroids)
-
-            if num_p == 0:
-                self.csv_writer.writerow([ts, "NONE"])
-            else:
-                coord_flat = []
-                for (px, py) in person_centroids:
-                    coord_flat.append(f"{px:.3f}")
-                    coord_flat.append(f"{py:.3f}")
-
-                # 사람 간 거리 (cm)
-                dist_list = []
-                for i in range(num_p):
-                    for j in range(i+1, num_p):
-                        dx = person_centroids[i][0] - person_centroids[j][0]
-                        dy = person_centroids[i][1] - person_centroids[j][1]
-                        dist_cm = math.sqrt(dx*dx + dy*dy) * 100
-                        dist_list.append(f"(p{i+1}-p{j+1}){dist_cm:.2f}")
-
-                self.csv_writer.writerow([ts] + coord_flat + dist_list)
-
-
-        # 2. [위치 이동] 자동 추적 로직 (return 위로 올림)
-        if self.ui.auto_tracking_enabled and person_centroids:
-            target_p = person_centroids[0]  # 가장 먼저 발견된 사람 추적
-            tx, ty = target_p[0], target_p[1]
-            
-            b_angle, t_angle = self.ui.tracker.calculate_angles(tx, ty)
-            
-            if self.ui.tracker.should_move(b_angle, t_angle):
-                self.ui.sendCmd(f"s1:{b_angle}")
-                time.sleep(0.01) 
-                self.ui.sendCmd(f"s2:{t_angle}")
+        
+        # ✅ 자동 추적 (시간 간격 제어)
+        current_time = time.time()
+        if hasattr(self.ui, 'auto_tracking_enabled') and self.ui.auto_tracking_enabled:
+            if target_person and (current_time - self.last_track_time >= self.track_interval):
+                tx, ty = target_person['pos']
                 
-        # Info UI 업데이트 
-        if self.mouse_inside:
-            mx, my = self.mouse_pos
-            d = math.sqrt(mx*mx + my*my)
-            beta = math.degrees(math.atan2(my, mx))
+                # ✅ 거리 필터
+                dist = target_person['dist']
+                if 0.5 < dist < 10.0:  # 0.5m ~ 10m만 추적
+                    
+                    # ✅ 부드러운 각도 계산
+                    b_angle, t_angle = self.ui.tracker.get_smooth_angles(tx, ty)
+                    
+                    if self.ui.tracker.should_move(b_angle, t_angle):
+                        print(f"[MOTOR] B:{b_angle}° T:{t_angle}°")
+                        
+                        self.ui.sendCmd(f"s1:{b_angle}")
+                        time.sleep(0.02)
+                        self.ui.sendCmd(f"s2:{t_angle}")
+                        
+                        self.last_track_time = current_time
 
-            self.info_text.set_text(
-                f"X: {mx:.3f} m\n"
-                f"Y: {my:.3f} m\n"
-                f"d: {d:.3f} m\n"
-                f"β: {beta:.3f}°"
-            )
         return self.scat,
 
 class State_Icon:
@@ -820,34 +776,168 @@ class ToggleButton(QPushButton):
         # 버튼 영역 안에서 손을 뗀 경우에만 시그널 발생
         if self.rect().contains(event.pos()):
             self.clicked_release.emit()
+'''
+class ObjectTracker:
+    def __init__(self, bottom_center=90, top_center=90, deadzone=2.0):
+        """
+        :param bottom_center: 바텀 모터 정면 각도 (기본 90)
+        :param top_center: 탑 모터 정면 각도 (기본 90)
+        :param deadzone: 모터 떨림 방지를 위한 최소 변화 각도
+        """
+        self.bottom_center = bottom_center
+        self.top_center = top_center
+        self.deadzone = deadzone
+        
+        # 마지막으로 전송한 각도 저장
+        self.last_bottom_angle = bottom_center
+        self.last_top_angle = top_center
 
+    def calculate_angles(self, target_x, target_y):
+        """
+        라이다 좌표 (x, y)를 모터 각도로 변환
+        $x$: 좌우 이동 거리 (m), $y$: 정면 거리 (m)
+        """
+        # 1. 바텀 모터 (Yaw) 계산: atan2(x, y)를 통해 각도 산출
+        # 라디안을 도(degree) 단위로 변환
+        angle_rad = math.atan2(target_x, target_y)
+        angle_deg = math.degrees(angle_rad)
+        
+        # 정면(90도) 기준 좌우 보정
+        target_bottom = self.bottom_center - angle_deg 
+
+        # 2. 탑 모터 (Pitch) 계산
+        # 라이다는 2D이므로 거리에 따라 각도를 살짝 조절하는 예시 로직
+        distance = math.sqrt(target_x**2 + target_y**2)
+        # 거리 5m를 기준으로 가까울수록 각도를 낮춤 (예시)
+        target_top = self.top_center - (10.0 / (distance + 0.1)) 
+
+        # 3. 안전 범위 제한 (0~180도)
+        target_bottom = max(0, min(180, target_bottom))
+        target_top = max(0, min(180, target_top))
+
+        return int(target_bottom), int(target_top)
+
+    def should_move(self, new_b, new_t):
+       # 미세한 떨림 방지 (데드존)
+        if abs(new_b - self.last_bottom_angle) > self.deadzone or \
+           abs(new_t - self.last_top_angle) > self.deadzone:
+            self.last_bottom_angle = new_b
+            self.last_top_angle = new_t
+            return True
+        return False
+
+class ObjectTracker:
+    def __init__(self, ui_ref, bottom_center=90, top_center=90, deadzone=3.0):
+        """
+        :param ui_ref: MyUI 참조 (오프셋 데이터 접근용)
+        :param bottom_center: Pan 모터 중립 각도
+        :param top_center: Tilt 모터 중립 각도
+        :param deadzone: 떨림 방지 최소 변화량
+        """
+        self.ui = ui_ref
+        self.bottom_center = bottom_center
+        self.top_center = top_center
+        self.deadzone = deadzone
+        
+        self.last_bottom_angle = bottom_center
+        self.last_top_angle = top_center
+
+    def calculate_angles(self, target_x_m, target_y_m):
+        """
+        LiDAR 좌표(m)를 서보 각도(0~180)로 변환
+        
+        :param target_x_m: 좌우 거리 (m)
+        :param target_y_m: 정면 거리 (m)
+        :return: (bottom_angle, top_angle)
+        """
+        # ✅ 1. 단위를 cm로 변환
+        lx = target_x_m * 100.0
+        ly = target_y_m * 100.0
+        lz = 0.0  # LiDAR는 2D
+
+        # ✅ 2. 오프셋 보정 (실측 데이터)
+        off1 = self.ui.off1
+        off2 = self.ui.off2
+        off3 = self.ui.off3
+
+        # Pan 모터 기준 좌표
+        m1_x = lx + off1['x']
+        m1_y = ly + off1['y']
+        
+        # Tilt 모터 기준 좌표
+        m2_x = m1_x + off2['x']
+        m2_y = m1_y + off2['y']
+        m2_z = lz + off1['z'] + off2['z']
+
+        # 렌즈 위치 (최종 타겟)
+        target_x = m2_x - off3['x']
+        target_y = m2_y - off3['y']
+        target_z = m2_z - off3['z']
+
+        # ✅ 3. Pan 각도 계산 (Yaw)
+        pan_deviation = math.degrees(math.atan2(m2_x, m2_y))
+        target_bottom = self.bottom_center - pan_deviation  # 좌우 반전
+
+        # ✅ 4. Tilt 각도 계산 (Pitch)
+        horizontal_dist = math.sqrt(target_x**2 + target_y**2)
+        tilt_deviation = math.degrees(math.atan2(target_z, horizontal_dist))
+        target_top = self.top_center - tilt_deviation
+
+        # ✅ 5. 안전 범위 제한
+        target_bottom = max(0, min(180, target_bottom))
+        target_top = max(0, min(180, target_top))
+
+        return int(target_bottom), int(target_top)
+
+    def should_move(self, new_b, new_t):
+        """데드존 체크"""
+        if abs(new_b - self.last_bottom_angle) > self.deadzone or \
+           abs(new_t - self.last_top_angle) > self.deadzone:
+            self.last_bottom_angle = new_b
+            self.last_top_angle = new_t
+            return True
+        return False
+ '''
 class MyUI(QWidget):
     def __init__(self):
         super().__init__()
+
+        # ✅ 1. 오프셋 먼저 정의 (tracker가 참조함)
+        self.off1 = {'x': 0.0,  'y': 35.7, 'z': 5.9}
+        self.off2 = {'x': 0.8,  'y': 36.7, 'z': 0.9}
+        self.off3 = {'x': 2.0,  'y': 0.0,  'z': 5.4}
+        
+        # 1. 상태 및 트래커 초기화 (순서 중요)
         self.state_icon = State_Icon(self)
+        self.tracker = ObjectTracker(ui_ref=self, bottom_center=90, top_center=90, deadzone=2.0)
+        self.auto_tracking_enabled = True # 시작 시 자동 추적 활성화
+        self.current_detected_people = []
+        
+        # 2. UI 생성
         self.initUI()
+        
+        # 3. 나머지 변수 초기화
         self.menu_open = False
         self.selected_port = None
-        self.serial_conn = None
-        self.ser = None               # 시리얼 객체
+        self.ser = None
         self.last_camera_frame_time = time.time()
         self.last_lidar_frame_time = time.time()
+        
+        # 장치 체크 타이머
         self.device_check_timer = QTimer()
         self.device_check_timer.timeout.connect(self.check_device_status)
-        self.device_check_timer.start(2000)   #초마다 검사
-        # [여기 추가] 로그 관련 초기화
-        self.safety_logger = SafetyLogger(OUT_DIR)
-        self.current_detected_people = []  # 탐지된 사람 정보 보관함
+        self.device_check_timer.start(2000)
         
-        # [여기 추가] 5초 로그 타이머
+        # 로그 설정
+        self.safety_logger = SafetyLogger(OUT_DIR)
         self.log_timer = QTimer(self)
         self.log_timer.timeout.connect(self.save_5sec_safety_log)
-
+        
         self.timer2 = QTimer(self)
         self.timer2.timeout.connect(self.update_timestamp)
         self.timer2.start(1000)
-        self.update_timestamp()
 
+       
     def save_5sec_safety_log(self):
         """5초마다 실행될 실제 저장 로직"""
         log_entry = {
@@ -1795,7 +1885,7 @@ class MyUI(QWidget):
 
 
         # RTSP URL
-        self.rtsp_url = "rtsp://admin:ajwptm12!@192.168.0.64:554/Streaming/Channels/101"
+        self.rtsp_url = "rtsp://admin:ajwptm12!@192.168.0.64:554/Streaming/Channels/102"
     
         # 카메라 스레드 생성
         self.cam_thread = CameraThread(
@@ -2074,29 +2164,6 @@ class MyUI(QWidget):
         print("[SYSTEM] START ON > 모든 장치 정상")
         QMessageBox.information(self, "SYSTEM", "시스템이 활성화되었습니다.")
 
-
-
-    # def handle_start(self):
-    #     # 3가지 센서 상태 검사
-    #     if not (self.state_icon.camera_connected and
-    #             self.state_icon.lidar_connected and
-    #             self.state_icon.comport_connected):
-
-    #         QMessageBox.warning(
-    #             self,
-    #             "장치 연결 오류",
-    #             "카메라, LiDAR, COMPORT가 모두 연결되어야 시작 가능합니다."
-    #         )
-    #         return
-
-    #     # 여기까지 통과 > STATE GREEN
-    #     self.state_icon.system_started = True
-    #     self.state_icon.update_state()
-
-    #     print("[SYSTEM] START ON > 모든 장치 정상 연결")
-    #     QMessageBox.information(self, "SYSTEM", "시스템이 활성화되었습니다.")
-
-
     def handle_end(self):
         # [추가] 5초 주기 로그 타이머 중지
         if hasattr(self, 'log_timer'):
@@ -2200,10 +2267,10 @@ class MyUI(QWidget):
 
 if __name__ == "__main__":
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-        "rtsp_transport;tcp|"
+        "rtsp_transport;udp|"
         "stimeout;10000000|"
         "max_delay;5000000|"
-        "buffer_size;1048576"
+        "buffer_size;1"
     )
     app = QApplication(sys.argv)
     ui = MyUI()
